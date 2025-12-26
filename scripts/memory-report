@@ -1,0 +1,19 @@
+#!/bin/bash
+# Memory report wrapper script that handles virtual environment automatically
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Change to project root
+cd "$PROJECT_ROOT"
+
+# Check if virtual environment exists
+if [ ! -d ".venv" ]; then
+    echo "❌ Virtual environment not found at $PROJECT_ROOT/.venv"
+    echo "   Please run: python -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
+
+# Run the Python script with the virtual environment's Python
+.venv/bin/python scripts/memory_report.py "$@"

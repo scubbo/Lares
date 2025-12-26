@@ -228,6 +228,17 @@ src/lares/
 └── main.py            # Entry point
 ```
 
+### Memory Compaction Recovery
+
+Lares gracefully handles Letta's automatic memory compaction when conversations exceed context limits:
+
+1. **Detection**: System alerts about memory constraints are automatically detected
+2. **Notification**: Shows "💭 *Reorganizing my thoughts...*" in Discord
+3. **Automatic Retry**: The interrupted operation is retried after compaction
+4. **Continuity**: Lares completes intended actions (especially important during perch time)
+
+This ensures Lares never gets "stunned" by memory compaction and maintains continuous operation.
+
 ### Memory Blocks
 
 Lares uses four memory blocks:

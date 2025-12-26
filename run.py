@@ -2,8 +2,25 @@
 """Simple runner script for Lares."""
 
 import sys
+import os
 
 sys.path.insert(0, 'src')
+
+# Load .env file first, before checking any env vars
+from dotenv import load_dotenv
+load_dotenv()
+
+# Enable context monitoring BEFORE importing memory module
+# This must happen before any imports from lares.memory
+if os.getenv("LARES_CONTEXT_MONITORING", "false").lower() == "true":
+    try:
+        from lares.monitoring_patch import apply_monitoring_patch
+        analyzer = apply_monitoring_patch()
+        print("[MAIN] Context monitoring activated", flush=True)
+    except Exception as e:
+        print(f"WARNING: Context monitoring failed with error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 import asyncio
 
@@ -25,6 +42,11 @@ async def run() -> None:
     setup_logging(config)
     log = get_logger("main")
     log.info("lares_starting", version="0.1.0", config_loaded=True)
+
+    # Log if monitoring was enabled (it was already set up before imports)
+    if os.getenv("LARES_CONTEXT_MONITORING", "false").lower() == "true":
+        log.info("context_monitoring_enabled")
+        print("Context monitoring is active", flush=True)
 
     client = create_letta_client(config)
     log.info("letta_client_ready")

@@ -54,3 +54,4 @@ htmlcov/
 *.db
 .letta/
 .lares/
+lares_export.af

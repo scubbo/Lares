@@ -1,6 +1,7 @@
 """Letta memory management for Lares."""
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -62,6 +63,8 @@ def create_letta_client(config: Config) -> Letta:
 
 
 LARES_MODEL = "anthropic/claude-opus-4-5-20251101"
+# Context window limit (default: 50k tokens)
+LARES_CONTEXT_WINDOW_LIMIT = int(os.getenv("LARES_CONTEXT_WINDOW_LIMIT", "50000"))
 
 
 async def get_or_create_agent(client: Letta, config: Config) -> str:
@@ -81,6 +84,17 @@ async def get_or_create_agent(client: Letta, config: Config) -> str:
                 )
                 client.agents.update(agent.id, model=LARES_MODEL)
 
+            # Update context window limit if it changed (or wasn't set before)
+            current_limit = getattr(agent, 'context_window_limit', None)
+            if current_limit != LARES_CONTEXT_WINDOW_LIMIT:
+                log.info(
+                    "updating_agent_context_window",
+                    old_limit=current_limit,
+                    new_limit=LARES_CONTEXT_WINDOW_LIMIT,
+                )
+                client.agents.update(agent.id, context_window_limit=LARES_CONTEXT_WINDOW_LIMIT)
+                print(f"\n✨ Context window: {current_limit} → {LARES_CONTEXT_WINDOW_LIMIT}")
+
             return agent.id
         except Exception as e:
             log.warning("stored_agent_not_found", agent_id=config.agent_id, error=str(e))
@@ -88,11 +102,12 @@ async def get_or_create_agent(client: Letta, config: Config) -> str:
     # Create a new agent with our memory blocks
     blocks = MemoryBlocks()
 
-    log.info("creating_new_agent")
+    log.info("creating_new_agent", context_window_limit=LARES_CONTEXT_WINDOW_LIMIT)
     agent = client.agents.create(
         name="lares",
         model=LARES_MODEL,
         embedding="openai/text-embedding-3-small",
+        context_window_limit=LARES_CONTEXT_WINDOW_LIMIT,  # Set explicit context window limit
         memory_blocks=[
             {"label": "persona", "value": blocks.persona},
             {"label": "human", "value": blocks.human},
@@ -114,6 +129,44 @@ class MessageResponse:
 
     text: str | None
     pending_tool_calls: list[PendingToolCall]
+    system_alert: str | None = None  # Memory compaction summary if detected
+    needs_retry: bool = False  # True if operation was interrupted by compaction
+
+
+def _detect_system_alert(response_messages: list[Any]) -> tuple[bool, str | None]:
+    """
+    Detect if the response contains a system alert about memory compaction.
+
+    Returns:
+        (is_system_alert, summary_text)
+    """
+    for msg in response_messages:
+        # Check for system_alert type message
+        msg_type = type(msg).__name__
+        if msg_type == "SystemAlertMessage" or msg_type == "system_alert":
+            # Extract the message content
+            if hasattr(msg, "message"):
+                return True, str(msg.message)
+            elif hasattr(msg, "content"):
+                return True, str(msg.content)
+
+        # Also check content for system alert patterns
+        if hasattr(msg, "content") and msg.content:
+            content_str = str(msg.content)
+            # Look for the telltale pattern
+            compaction_marker = "prior messages have been hidden"
+            if compaction_marker in content_str.lower():
+                return True, content_str
+            # Also check for JSON format
+            if '"type": "system_alert"' in content_str or '"type":"system_alert"' in content_str:
+                try:
+                    data = json.loads(content_str)
+                    if data.get("type") == "system_alert":
+                        return True, data.get("message", content_str)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    return False, None
 
 
 def _extract_expected_tool_id(error_msg: str) -> str | None:
@@ -237,8 +290,21 @@ def _clear_pending_approval(
     return None
 
 
-def send_message(client: Letta, agent_id: str, message: str) -> MessageResponse:
-    """Send a message to the agent and return the response with any pending tool calls."""
+def send_message(
+    client: Letta, agent_id: str, message: str, retry_on_compaction: bool = True
+) -> MessageResponse:
+    """
+    Send a message to the agent and return the response with any pending tool calls.
+
+    Args:
+        client: Letta client
+        agent_id: Agent ID
+        message: Message to send
+        retry_on_compaction: If True, detect memory compaction and mark for retry
+
+    Returns:
+        MessageResponse with text, pending tools, and system alert info
+    """
     log.debug("sending_message", agent_id=agent_id, message_preview=message[:50])
 
     try:
@@ -277,6 +343,22 @@ def send_message(client: Letta, agent_id: str, message: str) -> MessageResponse:
                 raise
         else:
             raise
+
+    # First check for system alerts (memory compaction)
+    is_system_alert, alert_summary = _detect_system_alert(response.messages)
+
+    if is_system_alert and retry_on_compaction:
+        log.info(
+            "memory_compaction_detected",
+            summary_preview=alert_summary[:100] if alert_summary else None,
+        )
+        # Return a response indicating retry is needed
+        return MessageResponse(
+            text=None,
+            pending_tool_calls=[],
+            system_alert=alert_summary,
+            needs_retry=True,
+        )
 
     text_response: str | None = None
     pending_tools: list[PendingToolCall] = []
@@ -334,8 +416,22 @@ def send_tool_result(
     tool_call_id: str,
     result: str,
     status: Literal["success", "error"] = "success",
+    retry_on_compaction: bool = True,
 ) -> MessageResponse:
-    """Send a tool execution result back to Letta and get the continuation."""
+    """
+    Send a tool execution result back to Letta and get the continuation.
+
+    Args:
+        client: Letta client
+        agent_id: Agent ID
+        tool_call_id: Tool call ID to respond to
+        result: Tool execution result
+        status: Tool execution status
+        retry_on_compaction: If True, detect memory compaction and mark for retry
+
+    Returns:
+        MessageResponse with continuation text, pending tools, and system alert info
+    """
     log.debug(
         "sending_tool_result",
         agent_id=agent_id,
@@ -411,6 +507,22 @@ def send_tool_result(
                 raise
         else:
             raise
+
+    # First check for system alerts (memory compaction)
+    is_system_alert, alert_summary = _detect_system_alert(response.messages)
+
+    if is_system_alert and retry_on_compaction:
+        log.info(
+            "memory_compaction_detected_in_tool_result",
+            summary_preview=alert_summary[:100] if alert_summary else None,
+        )
+        # Return a response indicating retry is needed
+        return MessageResponse(
+            text=None,
+            pending_tool_calls=[],
+            system_alert=alert_summary,
+            needs_retry=True,
+        )
 
     # Process the continuation response the same way
     text_response: str | None = None

@@ -18,8 +18,8 @@ from lares.tools import clear_discord_context, set_discord_context
 
 log = structlog.get_logger()
 
-# Perch time interval in hours
-PERCH_INTERVAL_HOURS = 1
+# Perch time interval (default: 60 minutes)
+PERCH_INTERVAL_MINUTES = int(os.getenv("LARES_PERCH_INTERVAL_MINUTES", "60"))
 
 
 class LaresBot(commands.Bot):
@@ -71,7 +71,7 @@ class LaresBot(commands.Bot):
         # Start perch time loop
         if not self.perch_time.is_running():
             self.perch_time.start()
-            log.info("perch_time_started", interval_hours=PERCH_INTERVAL_HOURS)
+            log.info("perch_time_started", interval_minutes=PERCH_INTERVAL_MINUTES)
 
     async def _execute_actions(
         self,
@@ -137,6 +137,20 @@ or use [silent] if no response is needed.)"""
 
         try:
             response = send_message(self.letta_client, self.agent_id, full_prompt)
+
+            # Check if memory compaction was detected
+            if response.needs_retry:
+                log.info("memory_compaction_during_scheduled_job", job_id=job_id)
+                # Send a friendly notification
+                await self._target_channel.send("💭 *Reorganizing my thoughts...*")
+
+                # Retry the message
+                response = send_message(
+                    self.letta_client,
+                    self.agent_id,
+                    full_prompt,
+                    retry_on_compaction=False,
+                )
 
             # Process response with streaming actions (no message to react to)
             await self._process_response_streaming(response, self._target_channel, message=None)
@@ -214,6 +228,23 @@ or use [silent] if no response is needed.)"""
                             result,
                             "success",
                         )
+
+                        # Check if memory compaction was detected during tool execution
+                        if response.needs_retry:
+                            log.info("memory_compaction_during_tool", tool=tool_call.name)
+                            # Send a friendly notification
+                            await channel.send("💭 *Reorganizing my thoughts...*")
+
+                            # Retry sending the tool result
+                            response = send_tool_result(
+                                self.letta_client,
+                                self.agent_id,
+                                tool_call.tool_call_id,
+                                result,
+                                "success",
+                                retry_on_compaction=False,  # Don't retry again
+                            )
+
                     except Exception as e:
                         # Letta API error - notify user and abort tool chain
                         log.error(
@@ -258,7 +289,7 @@ or use [silent] if no response is needed.)"""
             # Always clean up Discord context
             clear_discord_context()
 
-    @tasks.loop(hours=PERCH_INTERVAL_HOURS)
+    @tasks.loop(minutes=PERCH_INTERVAL_MINUTES)
     async def perch_time(self) -> None:
         """Autonomous tick - Lares wakes up to think, journal, and optionally act."""
         await self.wait_until_ready()
@@ -276,7 +307,7 @@ or use [silent] if no response is needed.)"""
         perch_prompt = f"""[PERCH TIME - {datetime.now().strftime("%Y-%m-%d %H:%M")}]
 {time_context}
 
-This is your autonomous perch time tick. You have {PERCH_INTERVAL_HOURS} hours between ticks.
+This is your autonomous perch time tick. You have {PERCH_INTERVAL_MINUTES} minutes between ticks.
 
 Available tools:
 - discord_react(emoji): React to messages with emoji (👀, ✅, 👍, etc.)
@@ -290,6 +321,7 @@ Available tools:
 - read_rss_feed(url, max_entries): Read RSS/Atom feeds for news and updates
 - read_bluesky_user(handle, limit): Read posts from a BlueSky user
 - search_bluesky(query, limit): Search BlueSky posts
+- post_to_bluesky(text): Post to BlueSky (requires approval)
 - restart_lares(): Restart yourself to apply updates or configuration changes
 - create_tool(source_code): Create new tools to extend your capabilities (requires approval)
 
@@ -308,6 +340,20 @@ What would you like to do?"""
 
         try:
             response = send_message(self.letta_client, self.agent_id, perch_prompt)
+
+            # Check if memory compaction was detected
+            if response.needs_retry:
+                log.info("memory_compaction_during_perch_time")
+                # Send a friendly notification
+                await channel.send("💭 *Reorganizing my thoughts...*")
+
+                # Retry the message - crucial for perch time to complete its tasks
+                response = send_message(
+                    self.letta_client,
+                    self.agent_id,
+                    perch_prompt,
+                    retry_on_compaction=False,
+                )
 
             # Process response with streaming actions (no message to react to)
             await self._process_response_streaming(response, channel, message=None)
@@ -363,6 +409,20 @@ What would you like to do?"""
                     self.agent_id,
                     formatted_message,
                 )
+
+                # Check if memory compaction was detected
+                if response.needs_retry:
+                    log.info("memory_compaction_during_message")
+                    # Send a friendly notification
+                    await channel.send("💭 *Reorganizing my thoughts...*")
+
+                    # Retry the message
+                    response = send_message(
+                        self.letta_client,
+                        self.agent_id,
+                        formatted_message,
+                        retry_on_compaction=False,  # Don't retry again
+                    )
 
                 # Process response with streaming actions
                 await self._process_response_streaming(response, channel, message)

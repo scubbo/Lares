@@ -6,6 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Load .env at module import time so env vars are available
+# before any other module reads them (e.g., discord_bot.py's PERCH_INTERVAL_MINUTES)
+load_dotenv()
+
 
 @dataclass
 class LettaConfig:
@@ -119,11 +123,13 @@ def _load_allowlist(path: Path) -> list[str]:
 
 
 def load_config(env_path: Path | None = None) -> Config:
-    """Load configuration from environment variables."""
+    """Load configuration from environment variables.
+
+    Note: load_dotenv() is called at module level above, so .env is already loaded.
+    The env_path parameter is kept for explicit override in tests.
+    """
     if env_path:
-        load_dotenv(env_path)
-    else:
-        load_dotenv()
+        load_dotenv(env_path, override=True)
 
     letta_config = LettaConfig(
         api_key=os.getenv("LETTA_API_KEY"),

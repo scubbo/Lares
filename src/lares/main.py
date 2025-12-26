@@ -1,6 +1,7 @@
 """Main entry point for Lares."""
 
 import asyncio
+import os
 import sys
 
 import structlog
@@ -39,6 +40,21 @@ async def run() -> None:
         print(f"Configuration error: {e}")
         print("Please copy .env.example to .env and fill in your credentials.")
         sys.exit(1)
+
+    # Enable context monitoring if requested
+    if os.getenv("LARES_CONTEXT_MONITORING", "false").lower() == "true":
+        try:
+            # Add project root to path to find tests directory
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+
+            from tests.test_context_analysis import instrument_memory_module
+            analyzer = instrument_memory_module()
+            log.info("context_monitoring_enabled")
+        except ImportError as e:
+            log.warning("context_monitoring_failed", error=str(e))
+            print(f"Warning: Context monitoring requested but failed to load: {e}")
 
     # Initialize Letta client
     letta_client = create_letta_client(config)
