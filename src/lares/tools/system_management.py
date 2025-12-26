@@ -22,8 +22,7 @@ async def restart_lares() -> str:
     See setup-sudoers.sh for configuration.
 
     Returns:
-        Success message. A goodbye message will be sent to Discord before
-        the restart happens, making the process graceful.
+        Success message confirming restart was initiated.
     """
     log.info("restart_lares_requested")
 
@@ -32,33 +31,29 @@ async def restart_lares() -> str:
 
     try:
         # Send a goodbye message to Discord first
-        await send_message("🔄 Restarting now... I'll be back in a moment!", reply=False)
+        await send_message(
+            "🔄 Restarting now... I'll be back in a moment!", reply=False
+        )
         log.info("restart_goodbye_sent")
 
         # Give Discord a moment to send the message
         await asyncio.sleep(1)
 
-        # Now execute the restart command
-        result = subprocess.run(
+        # Fire-and-forget: spawn restart as detached process so we can return
+        # before systemd kills us. start_new_session=True ensures the process
+        # survives our death.
+        subprocess.Popen(
             ["sudo", "systemctl", "restart", "lares.service"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
-        if result.returncode == 0:
-            log.info("restart_lares_initiated")
-            return "Restart initiated successfully."
-        else:
-            error_msg = result.stderr.strip() or result.stdout.strip()
-            log.error("restart_lares_failed", returncode=result.returncode, error=error_msg)
-            return f"Failed to restart: {error_msg}"
-
-    except subprocess.TimeoutExpired:
-        log.warning("restart_lares_timeout")
-        return "Restart command timed out, but may have succeeded. Check systemd status."
+        log.info("restart_lares_initiated")
+        return "Restart initiated! Goodbye... 👋"
 
     except Exception as e:
-        log.error("restart_lares_exception", error=str(e), error_type=type(e).__name__)
+        log.error(
+            "restart_lares_exception", error=str(e), error_type=type(e).__name__
+        )
         return f"Error restarting: {e}"
