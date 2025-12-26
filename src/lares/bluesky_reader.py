@@ -404,11 +404,15 @@ def create_post(text: str) -> BlueskyPostResult:
         )
 
     except urllib.error.HTTPError as e:
+        try:
+            error_body = e.read().decode("utf-8")
+        except Exception:
+            error_body = ""
         error_msg = f"HTTP {e.code}: {e.reason}"
-        log.error("bluesky_post_http_error", error=error_msg)
+        log.error("bluesky_post_http_error", error=error_msg, body=error_body)
         if e.code in (401, 403):
             _session_cache.clear()
-        return BlueskyPostResult(success=False, error=error_msg)
+        return BlueskyPostResult(success=False, error=f"{error_msg} - {error_body}")
 
     except Exception as e:
         log.error("bluesky_post_error", error=str(e), error_type=type(e).__name__)
