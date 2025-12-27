@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from letta_client import Letta
 
 from lares.config import Config
+from lares.mcp_bridge import POLL_INTERVAL, get_bridge
 from lares.memory import MessageResponse, send_message, send_tool_result
 from lares.response_parser import DiscordAction, parse_response
 from lares.scheduler import get_scheduler
@@ -43,6 +44,9 @@ class LaresBot(commands.Bot):
         )
         self._target_channel: discord.TextChannel | None = None
 
+        # MCP approval bridge
+        self._mcp_bridge = get_bridge()
+
         # Maximum tool call iterations to prevent infinite loops
         # Load after config is initialized so .env is already loaded
         self.max_tool_iterations = int(os.getenv("LARES_MAX_TOOL_ITERATIONS", "10"))
@@ -72,6 +76,11 @@ class LaresBot(commands.Bot):
         if not self.perch_time.is_running():
             self.perch_time.start()
             log.info("perch_time_started", interval_minutes=PERCH_INTERVAL_MINUTES)
+
+        # Start MCP approval polling
+        if not self.poll_mcp_approvals.is_running():
+            self.poll_mcp_approvals.start()
+            log.info("mcp_approval_polling_started", interval_seconds=POLL_INTERVAL)
 
     async def _execute_actions(
         self,
@@ -115,7 +124,7 @@ class LaresBot(commands.Bot):
         """
         Handle a scheduled job firing.
 
-        This is called by the scheduler when a job's time comes.
+        This is called by the scheduler when a job\'s time comes.
         We send the prompt to Letta and process any response.
         """
         log.info("scheduled_job_triggered", job_id=job_id)
@@ -159,7 +168,6 @@ or use [silent] if no response is needed.)"""
 
         except Exception as e:
             log.error("scheduled_job_failed", job_id=job_id, error=str(e))
-
     async def _process_response_streaming(
         self,
         response: MessageResponse,
@@ -242,7 +250,7 @@ or use [silent] if no response is needed.)"""
                                 tool_call.tool_call_id,
                                 result,
                                 "success",
-                                retry_on_compaction=False,  # Don't retry again
+                                retry_on_compaction=False,  # Don\'t retry again
                             )
 
                     except Exception as e:
@@ -259,7 +267,7 @@ or use [silent] if no response is needed.)"""
                             f"```\n{args_preview}\n```\n"
                             f"Error: {e}"
                         )
-                        # Can't continue the tool chain - Letta state is inconsistent
+                        # Can\'t continue the tool chain - Letta state is inconsistent
                         return
 
                     # Execute any actions from this response immediately
@@ -274,7 +282,7 @@ or use [silent] if no response is needed.)"""
                         await self._execute_actions(actions, channel, message)
 
                     # Always break after processing one tool call - the response has been
-                    # updated, so we need to check the NEW response's pending_tool_calls
+                    # updated, so we need to check the NEW response\'s pending_tool_calls
                     # in the while loop, not continue iterating over the old list
                     break
 
@@ -288,7 +296,6 @@ or use [silent] if no response is needed.)"""
         finally:
             # Always clean up Discord context
             clear_discord_context()
-
     @tasks.loop(minutes=PERCH_INTERVAL_MINUTES)
     async def perch_time(self) -> None:
         """Autonomous tick - Lares wakes up to think, journal, and optionally act."""
@@ -334,9 +341,9 @@ Take a moment to:
 4. Optionally send a message to Daniele if you have something to share
 
 You can respond with:
-- A message to send to Discord (I'll post it)
+- A message to send to Discord (I will post it)
 - Just "[silent]" if you prefer to stay quiet this tick
-- Or "[thinking]" followed by your reflections (I won't post these)
+- Or "[thinking]" followed by your reflections (I will not post these)
 
 What would you like to do?"""
 
@@ -347,7 +354,7 @@ What would you like to do?"""
             if response.needs_retry:
                 log.info("memory_compaction_during_perch_time")
                 # Send a friendly notification
-                await channel.send("💭 *Reorganizing my thoughts...*")
+                await channel.send("*Reorganizing my thoughts...*")
 
                 # Retry the message - crucial for perch time to complete its tasks
                 response = send_message(
@@ -370,96 +377,127 @@ What would you like to do?"""
         """Wait for bot to be ready before starting perch time."""
         await self.wait_until_ready()
 
+    @tasks.loop(seconds=POLL_INTERVAL)
+    async def poll_mcp_approvals(self) -> None:
+        """Poll MCP server for pending approvals and post to Discord."""
+        if not self._target_channel:
+            return
+
+        try:
+            new_approvals = await self._mcp_bridge.poll_approvals()
+            for approval in new_approvals:
+                msg_text = self._mcp_bridge.format_approval_message(approval)
+                msg = await self._target_channel.send(msg_text)
+                # Add reaction buttons for easy approval/denial
+                await msg.add_reaction("✅")
+                await msg.add_reaction("❌")
+                self._mcp_bridge.track_message(approval.approval_id, msg.id)
+                log.info(
+                    "mcp_approval_posted",
+                    approval_id=approval.approval_id,
+                    tool=approval.tool,
+                )
+        except Exception as e:
+            # Do not spam logs if MCP server is just not running
+            if "Connection refused" not in str(e):
+                log.error("mcp_poll_failed", error=str(e))
+
+    @poll_mcp_approvals.before_loop
+    async def before_poll_mcp(self) -> None:
+        """Wait for bot to be ready before starting MCP polling."""
+        await self.wait_until_ready()
     async def on_message(self, message: discord.Message) -> None:
         """Handle incoming messages."""
-        # Ignore our own messages
+        # Ignore messages from self
         if message.author == self.user:
             return
 
-        # Only respond in the configured channel
+        # Ignore messages from other channels
         if message.channel.id != self.target_channel_id:
             return
 
-        # Ignore bot commands (let commands extension handle them)
-        if message.content.startswith("!"):
-            await self.process_commands(message)
+        # Process commands first
+        await self.process_commands(message)
+
+        # Ignore command messages
+        if message.content.startswith(self.command_prefix):
             return
 
         log.info(
-            "received_message",
+            "discord_message_received",
             author=str(message.author),
-            content_preview=message.content[:50],
+            content_preview=message.content[:100] if message.content else "(empty)",
         )
 
-        channel = message.channel
-        if not isinstance(channel, discord.TextChannel):
-            return
+        # Prepare content with username
+        content = f"[Discord message from {message.author.display_name}]: {message.content}"
 
-        # Show typing indicator while processing
-        async with channel.typing():
-            try:
-                # Include time context in message
-                time_context = self._get_time_context()
+        # Add time context
+        time_context = self._get_time_context()
+        full_message = f"{time_context}\n\n{content}"
 
-                formatted_message = (
-                    f"{time_context}\n\n"
-                    f"[Discord message from {message.author.display_name}]: {message.content}"
-                )
+        # Send to Letta
+        response = send_message(self.letta_client, self.agent_id, full_message)
 
-                response = send_message(
-                    self.letta_client,
-                    self.agent_id,
-                    formatted_message,
-                )
+        # Check if memory compaction was detected
+        if response.needs_retry:
+            log.info("memory_compaction_detected")
+            # Send a friendly message to indicate we\'re thinking
+            await message.channel.send("💭 *Reorganizing my thoughts...*")
 
-                # Check if memory compaction was detected
-                if response.needs_retry:
-                    log.info("memory_compaction_during_message")
-                    # Send a friendly notification
-                    await channel.send("💭 *Reorganizing my thoughts...*")
+            # Retry the message
+            response = send_message(
+                self.letta_client,
+                self.agent_id,
+                full_message,
+                retry_on_compaction=False,  # Don\'t retry again if it happens twice
+            )
 
-                    # Retry the message
-                    response = send_message(
-                        self.letta_client,
-                        self.agent_id,
-                        formatted_message,
-                        retry_on_compaction=False,  # Don't retry again
-                    )
-
-                # Process response with streaming actions
-                await self._process_response_streaming(response, channel, message)
-
-            except Exception as e:
-                log.error("message_processing_failed", error=str(e))
-                await message.add_reaction("❌")
+        # Process response with streaming actions
+        if isinstance(message.channel, discord.TextChannel):
+            await self._process_response_streaming(response, message.channel, message)
 
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User) -> None:
-        """Handle reaction additions for approval workflow."""
+        """Handle reactions - used for tool approval and MCP approvals."""
+        # Ignore own reactions
         if user == self.user:
             return
 
+        # Only handle reactions in target channel
         if reaction.message.channel.id != self.target_channel_id:
             return
 
-        # Check if this is an approval reaction
-        result = await handle_approval_reaction(
+        # Check if this is an MCP approval reaction
+        mcp_result = self._mcp_bridge.handle_reaction(reaction.message.id, str(reaction.emoji))
+        if mcp_result:
+            approval_id, status, tool, result_text = mcp_result
+            log.info("mcp_approval_handled", approval_id=approval_id, status=status)
+            # Add checkmark to indicate it was processed
+            await reaction.message.add_reaction("✔️")
+            return
+
+        # Check if this is a tool approval reaction
+        approved = await handle_approval_reaction(
             reaction.message.id,
             str(reaction.emoji),
             user,
         )
 
-        if result is not None:
-            approved, command = result
-            if approved:
-                log.info("command_approval_granted", command=command, user=str(user))
-            else:
-                log.info("command_approval_denied", command=command, user=str(user))
+        if approved:
+            log.info("reaction_approved_tool", message_id=reaction.message.id)
 
     async def close(self) -> None:
-        """Clean up when bot is closing."""
-        # Shutdown scheduler
-        scheduler = get_scheduler()
-        scheduler.shutdown()
+        """Clean shutdown."""
+        # Stop perch time if running
+        if self.perch_time.is_running():
+            self.perch_time.cancel()
+            log.info("perch_time_stopped")
+
+        # Stop MCP polling if running
+        if self.poll_mcp_approvals.is_running():
+            self.poll_mcp_approvals.cancel()
+            log.info("mcp_polling_stopped")
+
         await super().close()
 
 

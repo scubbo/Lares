@@ -120,13 +120,28 @@ def _make_post_request(url: str, data: dict, headers: dict | None = None) -> dic
         return json.loads(response.read().decode("utf-8"))
 
 
-def _get_auth_token() -> str | None:
-    """Get an authentication token, using cached session if available."""
+def _clear_session():
+    """Clear the authentication session cache."""
+    global _session_cache
+    _session_cache.clear()
+    log.info("bluesky_session_cleared")
+
+
+def _get_auth_token(force_refresh: bool = False) -> str | None:
+    """Get an authentication token, using cached session if available.
+    
+    Args:
+        force_refresh: If True, ignore cache and re-authenticate
+    """
     global _session_cache
 
     # Check if we have a cached token
-    if "access_jwt" in _session_cache:
+    if not force_refresh and "access_jwt" in _session_cache:
         return _session_cache["access_jwt"]
+
+    # Clear any stale cache if forcing refresh
+    if force_refresh:
+        _session_cache.clear()
 
     # Try to authenticate
     handle = os.environ.get("BLUESKY_HANDLE")
@@ -162,6 +177,20 @@ def _get_auth_token() -> str | None:
     except Exception as e:
         log.error("bluesky_auth_error", error=str(e))
         return None
+
+
+def _is_token_expired_error(error: urllib.error.HTTPError) -> bool:
+    """Check if an HTTP error indicates an expired token."""
+    if error.code == 401:
+        return True
+    if error.code == 400:
+        try:
+            error_body = error.read().decode("utf-8")
+            # Reset the file pointer so caller can read it too
+            return "ExpiredToken" in error_body
+        except Exception:
+            pass
+    return False
 
 
 def _parse_post(post_view: dict) -> BlueskyPost:
@@ -261,13 +290,13 @@ def search_posts(query: str, limit: int = 10) -> BlueskyFeedResult:
             error="Search requires authentication. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
         )
 
-    try:
+    def _do_search(token: str) -> BlueskyFeedResult:
         # URL encode the query
         encoded_query = urllib.parse.quote(query)
         search_url = f"{BSKY_AUTH_API}/app.bsky.feed.searchPosts?q={encoded_query}&limit={limit}"
 
         # Make authenticated request
-        headers = {"Authorization": f"Bearer {auth_token}"}
+        headers = {"Authorization": f"Bearer {token}"}
         search_data = _make_request(search_url, headers=headers)
 
         posts = []
@@ -285,12 +314,24 @@ def search_posts(query: str, limit: int = 10) -> BlueskyFeedResult:
             cursor=search_data.get("cursor"),
         )
 
+    try:
+        return _do_search(auth_token)
+
     except urllib.error.HTTPError as e:
+        # Check for expired token and retry
+        if _is_token_expired_error(e):
+            log.info("bluesky_token_expired_retrying", msg="Token expired, refreshing and retrying")
+            new_token = _get_auth_token(force_refresh=True)
+            if new_token:
+                try:
+                    return _do_search(new_token)
+                except urllib.error.HTTPError as retry_e:
+                    error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
+                    log.error("bluesky_search_http_error_after_retry", query=query, error=error_msg)
+                    return BlueskyFeedResult(posts=[], error=error_msg)
+        
         error_msg = f"HTTP {e.code}: {e.reason}"
         log.error("bluesky_search_http_error", query=query, error=error_msg)
-        # Clear session cache on auth errors
-        if e.code in (401, 403):
-            _session_cache.clear()
         return BlueskyFeedResult(posts=[], error=error_msg)
 
     except urllib.error.URLError as e:
@@ -337,6 +378,7 @@ def create_post(text: str) -> BlueskyPostResult:
     Create a new post on BlueSky.
 
     Requires authentication - set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD in .env.
+    Automatically refreshes expired tokens and retries.
 
     Args:
         text: The text content of the post (max 300 characters)
@@ -359,28 +401,12 @@ def create_post(text: str) -> BlueskyPostResult:
             error="Post text cannot be empty."
         )
 
-    # Get auth token
-    auth_token = _get_auth_token()
-    if not auth_token:
-        return BlueskyPostResult(
-            success=False,
-            error="Authentication required. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
-        )
-
-    # Get DID from cache
-    did = _session_cache.get("did")
-    if not did:
-        return BlueskyPostResult(
-            success=False,
-            error="No DID in session cache. Re-authentication required."
-        )
-
-    try:
+    def _do_post(token: str, did: str) -> BlueskyPostResult:
         from datetime import datetime
 
         # Create the post record
         create_url = f"{BSKY_AUTH_API}/com.atproto.repo.createRecord"
-        headers = {"Authorization": f"Bearer {auth_token}"}
+        headers = {"Authorization": f"Bearer {token}"}
 
         record = {
             "$type": "app.bsky.feed.post",
@@ -403,15 +429,49 @@ def create_post(text: str) -> BlueskyPostResult:
             cid=response.get("cid"),
         )
 
+    # Get auth token
+    auth_token = _get_auth_token()
+    if not auth_token:
+        return BlueskyPostResult(
+            success=False,
+            error="Authentication required. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
+        )
+
+    # Get DID from cache
+    did = _session_cache.get("did")
+    if not did:
+        return BlueskyPostResult(
+            success=False,
+            error="No DID in session cache. Re-authentication required."
+        )
+
+    try:
+        return _do_post(auth_token, did)
+
     except urllib.error.HTTPError as e:
+        # Check for expired token and retry
+        if _is_token_expired_error(e):
+            log.info("bluesky_token_expired_retrying", msg="Token expired, refreshing and retrying")
+            new_token = _get_auth_token(force_refresh=True)
+            new_did = _session_cache.get("did")
+            if new_token and new_did:
+                try:
+                    return _do_post(new_token, new_did)
+                except urllib.error.HTTPError as retry_e:
+                    try:
+                        error_body = retry_e.read().decode("utf-8")
+                    except Exception:
+                        error_body = ""
+                    error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
+                    log.error("bluesky_post_http_error_after_retry", error=error_msg, body=error_body)
+                    return BlueskyPostResult(success=False, error=f"{error_msg} - {error_body}")
+        
         try:
             error_body = e.read().decode("utf-8")
         except Exception:
             error_body = ""
         error_msg = f"HTTP {e.code}: {e.reason}"
         log.error("bluesky_post_http_error", error=error_msg, body=error_body)
-        if e.code in (401, 403):
-            _session_cache.clear()
         return BlueskyPostResult(success=False, error=f"{error_msg} - {error_body}")
 
     except Exception as e:

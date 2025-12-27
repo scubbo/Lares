@@ -2,7 +2,7 @@
 # Setup passwordless sudo for Lares self-restart capability
 #
 # This script configures sudo to allow the current user to restart the Lares
-# systemd service without entering a password. This enables Lares to restart
+# systemd services without entering a password. This enables Lares to restart
 # itself when needed (e.g., after updates, configuration changes, or periodic
 # maintenance).
 #
@@ -10,8 +10,9 @@
 #   sudo ./scripts/setup-sudoers.sh
 #
 # Security Note:
-#   This grants passwordless sudo ONLY for the specific command:
-#   'systemctl restart lares.service'
+#   This grants passwordless sudo ONLY for the specific commands:
+#   - 'systemctl restart lares.service'
+#   - 'systemctl restart lares-mcp.service'
 #   No other sudo commands are affected.
 
 set -euo pipefail
@@ -36,14 +37,15 @@ SUDOERS_FILE="/etc/sudoers.d/lares"
 
 echo "Setting up passwordless sudo for Lares self-restart..."
 echo "User: $ACTUAL_USER"
-echo "Service: lares.service"
+echo "Services: lares.service, lares-mcp.service"
 echo ""
 
 # Create sudoers entry
 cat > "$SUDOERS_FILE" << EOF
-# Allow $ACTUAL_USER to restart Lares service without password
+# Allow $ACTUAL_USER to restart Lares services without password
 # This enables Lares to restart itself for updates and maintenance
 $ACTUAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lares.service
+$ACTUAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lares-mcp.service
 EOF
 
 # Set proper permissions (sudoers files must be 0440)
@@ -55,16 +57,18 @@ if visudo -c -f "$SUDOERS_FILE" > /dev/null 2>&1; then
     echo "✓ File: $SUDOERS_FILE"
     echo ""
     echo "Testing the configuration..."
-
+    
     # Test by checking if sudo -l shows the permission
     if su - "$ACTUAL_USER" -c "sudo -n -l /usr/bin/systemctl restart lares.service" 2>&1 | grep -q "restart lares.service"; then
         echo "✓ Passwordless sudo is working correctly!"
     else
         echo "⚠ Warning: Could not verify sudo permissions (but visudo passed)"
     fi
-
+    
     echo ""
-    echo "Lares can now restart itself using: sudo systemctl restart lares.service"
+    echo "Lares can now restart itself using:"
+    echo "  sudo systemctl restart lares-mcp.service"
+    echo "  sudo systemctl restart lares.service"
 else
     echo "✗ Error: Invalid sudoers configuration"
     rm -f "$SUDOERS_FILE"
