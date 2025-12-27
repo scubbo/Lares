@@ -18,6 +18,7 @@ Inspired by [Strix](https://timkellogg.me/blog/2025/12/15/strix), Lares is an am
 - **Self-Management**: Can restart itself for updates and maintenance
 - **Tool System**: File operations, shell commands, RSS feeds, BlueSky integration, and more
 - **Skills System**: Procedural memory through markdown files - teaches Lares how to perform tasks
+- **MCP Server**: Portable tool layer via Model Context Protocol - connect any MCP-compatible system
 - **Extensible**: Designed for adding new interfaces (Telegram, web) and capabilities
 
 ## Quick Start
@@ -217,6 +218,9 @@ src/lares/
 ├── bluesky_reader.py  # BlueSky API client
 ├── rss_reader.py      # RSS/Atom feed parser
 ├── obsidian.py        # Obsidian vault integration (optional)
+├── mcp_server.py     # MCP server exposing tools via SSE
+├── mcp_approval.py   # SQLite-based approval queue for MCP
+├── mcp_bridge.py     # Bridges MCP approvals to Discord
 ├── tools/             # Tool implementations
 │   ├── filesystem.py      # read_file, write_file
 │   ├── shell.py           # run_command
@@ -268,9 +272,9 @@ Skills are indexed in Lares's persona (lightweight pointers) and loaded via `rea
 
 ### Available Tools
 
-Lares has access to 14 registered tools, plus optional Obsidian integration:
+Lares has access to 20 tools (native + MCP), plus optional Obsidian integration:
 
-#### Core Tools (14)
+#### Native Tools (10)
 
 | Tool | Description |
 |------|-------------|
@@ -334,3 +338,56 @@ This software is licensed under the PolyForm Noncommercial License 1.0.0, a mode
 Lares is a labor of love meant to empower individuals, not enrich corporations. The PolyForm Noncommercial license provides crystal-clear terms that prevent any commercial exploitation while keeping the software freely available for personal, educational, and charitable use.
 
 See [LICENSE](LICENSE) for full terms.
+
+## MCP Server
+
+Lares includes an MCP (Model Context Protocol) server that exposes tools in a framework-agnostic way. This enables portability - you can connect any MCP-compatible system (Letta, Claude Desktop, etc.) to use Lares tools.
+
+### Running the MCP Server
+
+```bash
+# Start the MCP server (default: http://0.0.0.0:8765)
+python -m lares.mcp_server
+
+# Or as a systemd service (see lares-mcp.service)
+```
+
+### MCP Tools (10)
+
+The MCP server provides these tools:
+
+| Tool | Description |
+|------|-------------|
+| `run_shell_command` | Execute shell commands (with approval for non-allowlisted) |
+| `read_file` | Read files from allowed directories |
+| `write_file` | Write files to allowed directories |
+| `list_directory` | List contents of a directory |
+| `read_rss_feed` | Read RSS/Atom feeds |
+| `read_bluesky_user` | Read posts from a BlueSky user |
+| `search_bluesky` | Search BlueSky posts |
+| `post_to_bluesky` | Post to BlueSky (requires approval) |
+| `search_obsidian_notes` | Search notes in Obsidian vault |
+| `read_obsidian_note` | Read a specific note from Obsidian |
+
+### Approval Queue
+
+The MCP server includes an HTTP-based approval queue for sensitive operations:
+
+```
+GET  /approvals/pending      - List pending approvals
+GET  /approvals/{id}         - Get specific approval
+POST /approvals/{id}/approve - Approve and execute
+POST /approvals/{id}/deny    - Deny request
+GET  /health                 - Health check
+```
+
+Lares bridges this queue to Discord, allowing you to approve/deny via reactions.
+
+### Connecting Letta to MCP
+
+Lares automatically connects to the MCP server and attaches tools to the Letta agent. Configuration in `.env`:
+
+```
+LARES_MCP_URL=http://localhost:8765/sse
+```
+

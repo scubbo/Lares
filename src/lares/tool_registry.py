@@ -23,6 +23,7 @@ from lares.tools import (
     read_rss_feed,
     remove_job,
     restart_lares,
+    restart_mcp,
     run_command,
     schedule_job,
     search_bluesky,
@@ -226,6 +227,8 @@ class ToolExecutor:
                 return await self._discord_react(arguments.get("emoji", ""))
             elif tool_name == "restart_lares":
                 return await self._restart_lares()
+            elif tool_name == "restart_mcp":
+                return await self._restart_mcp()
             elif tool_name == "search_obsidian_notes":
                 return self._search_obsidian_notes(
                     arguments.get("query", ""),
@@ -414,6 +417,10 @@ class ToolExecutor:
     async def _restart_lares(self) -> str:
         """Restart the Lares service."""
         return await restart_lares()
+
+    async def _restart_mcp(self) -> str:
+        """Restart only the MCP server."""
+        return await restart_mcp()
 
     def _search_obsidian_notes(self, query: str, max_results: int) -> str:
         """Search notes in the Obsidian vault."""
@@ -735,6 +742,7 @@ def register_tools_with_letta(client: Letta, agent_id: str) -> list[str]:
         "search_obsidian_notes",
         "read_obsidian_note",
         "restart_lares",
+        "restart_mcp",
     }
 
     registered: list[str] = []

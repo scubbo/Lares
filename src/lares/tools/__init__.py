@@ -38,7 +38,7 @@ from lares.tools.scheduler import (
     schedule_job,
 )
 from lares.tools.shell import add_to_allowlist, is_command_allowed, run_command
-from lares.tools.system_management import restart_lares
+from lares.tools.system_management import restart_lares, restart_mcp
 from lares.tools.tool_creation import validate_tool_code
 
 __all__ = [
@@ -69,5 +69,6 @@ __all__ = [
     "post_to_bluesky",
     "search_bluesky",
     "restart_lares",
+    "restart_mcp",
     "validate_tool_code",
 ]

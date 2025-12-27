@@ -1,0 +1,18 @@
+[Unit]
+Description=Lares MCP Server - Tool Provider with Approval Queue
+After=network.target
+Before=lares.service
+
+[Service]
+Type=simple
+User=daniele
+WorkingDirectory=/home/daniele/workspace/lares
+Environment=PATH=/home/daniele/workspace/lares/.venv/bin:/usr/bin:/bin
+ExecStart=/home/daniele/workspace/lares/.venv/bin/python -m lares.mcp_server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
