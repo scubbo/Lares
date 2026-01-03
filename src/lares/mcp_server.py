@@ -36,6 +36,7 @@ from mcp.server import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
+from lares import mcp_graph_tools
 from lares.mcp_approval import get_queue
 from lares.scheduler import get_scheduler
 
@@ -264,11 +265,20 @@ NO_APPROVAL_TOOLS = {
     "read_rss_feed",
     "read_bluesky_user",
     "search_bluesky",
+    "get_bluesky_notifications",
+    "follow_bluesky_user",
+    "unfollow_bluesky_user",
     "search_obsidian_notes",
     "read_obsidian_note",
     "schedule_add_job",
     "schedule_remove_job",
     "schedule_list_jobs",
+    "graph_create_node",
+    "graph_search_nodes",
+    "graph_create_edge",
+    "graph_get_connected",
+    "graph_traverse",
+    "graph_stats",
 }
 
 
@@ -403,6 +413,8 @@ async def approve_request(request: Request) -> JSONResponse:
             result_str = _execute_write_file(args["path"], args["content"])
         elif tool_name == "post_to_bluesky":
             result_str = _execute_bluesky_post(args["text"])
+        elif tool_name == "reply_to_bluesky_post":
+            result_str = _execute_bluesky_reply(args["text"], args["parent_uri"])
         else:
             # Fallback for other tools (shouldn't happen often)
             result = await mcp.call_tool(tool_name, args)
@@ -906,6 +918,15 @@ def search_bluesky(query: str, limit: int = 10) -> str:
         return f"Error searching BlueSky: {e}"
 
 
+@mcp.tool()
+def get_bluesky_notifications(limit: int = 20) -> str:
+    """Get recent BlueSky notifications (mentions, replies, likes, reposts, follows, quotes)."""
+    from lares.bluesky_reader import get_notifications
+
+    result = get_notifications(limit=limit)
+    return result.format_summary(max_items=limit)
+
+
 def _execute_bluesky_post(text: str, retry: bool = True) -> str:
     """Internal: Execute BlueSky post without approval check."""
     auth_token = _get_bsky_auth_token()
@@ -951,7 +972,7 @@ def _execute_bluesky_post(text: str, retry: bool = True) -> str:
 
 @mcp.tool()
 async def post_to_bluesky(text: str) -> str:
-    """Post a message to BlueSky. Requires approval."""
+    """Post a message to BlueSky. Requires approval. Supports @mentions and #hashtags."""
     if len(text) > 300:
         return f"Error: Post too long ({len(text)} chars). Maximum is 300."
     if not text.strip():
@@ -969,6 +990,67 @@ async def post_to_bluesky(text: str) -> str:
         },
     )
     return f"🦋 BlueSky post queued for approval. ID: {approval_id}\nApproval request sent via SSE."
+
+
+@mcp.tool()
+def follow_bluesky_user(handle: str) -> str:
+    """Follow a user on BlueSky. Does not require approval (reversible action)."""
+    from lares.bluesky_reader import follow_user
+
+    result = follow_user(handle)
+    return result.format_result()
+
+
+@mcp.tool()
+def unfollow_bluesky_user(handle: str) -> str:
+    """Unfollow a user on BlueSky. Does not require approval (reversible action)."""
+    from lares.bluesky_reader import unfollow_user
+
+    result = unfollow_user(handle)
+    return result.format_result()
+
+
+def _execute_bluesky_reply(text: str, parent_uri: str) -> str:
+    """Internal: Execute BlueSky reply without approval check."""
+    from lares.bluesky_reader import create_reply
+
+    result = create_reply(text, parent_uri)
+    return result.format_result()
+
+
+@mcp.tool()
+async def reply_to_bluesky_post(text: str, parent_uri: str) -> str:
+    """Reply to a BlueSky post. Requires approval (public action).
+
+    Args:
+        text: The reply text (max 300 characters). Include @handles to mention users
+              and #tags for hashtags.
+        parent_uri: The AT URI of the post to reply to
+                    (e.g., "at://did:plc:xxx/app.bsky.feed.post/yyy")
+    """
+    if len(text) > 300:
+        return f"Error: Reply too long ({len(text)} chars). Maximum is 300."
+    if not text.strip():
+        return "Error: Reply text cannot be empty."
+    if not parent_uri.startswith("at://"):
+        return "Error: parent_uri must be an AT URI (at://...)"
+
+    approval_id = approval_queue.submit(
+        "reply_to_bluesky_post", {"text": text, "parent_uri": parent_uri}
+    )
+    await push_event(
+        "approval_needed",
+        {
+            "id": approval_id,
+            "tool": "reply_to_bluesky_post",
+            "text": text,
+            "parent_uri": parent_uri,
+        },
+    )
+    return (
+        f"💬 BlueSky reply queued for approval. ID: {approval_id}\n"
+        "Approval request sent via SSE."
+    )
 
 
 # === OBSIDIAN TOOLS ===
@@ -1131,6 +1213,107 @@ async def memory_search(query: str, limit: int = 5) -> str:
 
 
 # === SCHEDULER TOOLS ===
+
+# === GRAPH MEMORY TOOLS ===
+# These tools provide associative memory via a graph structure
+
+
+@mcp.tool()
+async def graph_create_node(
+    content: str,
+    source: str = "conversation",
+    summary: str | None = None,
+    tags: str | None = None,
+) -> str:
+    """Create a new memory node in the graph.
+
+    Args:
+        content: The memory content to store
+        source: Origin type (conversation, perch_tick, research, reflection)
+        summary: Optional short summary
+        tags: Optional comma-separated tags
+    """
+    return await mcp_graph_tools.graph_create_node(content, source, summary, tags)
+
+
+@mcp.tool()
+async def graph_search_nodes(
+    query: str,
+    limit: int = 10,
+    source: str | None = None,
+) -> str:
+    """Search memory nodes by content.
+
+    Args:
+        query: Text to search for
+        limit: Maximum results to return
+        source: Optional filter by source type
+    """
+    return await mcp_graph_tools.graph_search_nodes(query, limit, source)
+
+
+@mcp.tool()
+async def graph_create_edge(
+    source_id: str,
+    target_id: str,
+    edge_type: str = "related",
+    weight: float = 0.5,
+) -> str:
+    """Create an edge between two memory nodes.
+
+    Args:
+        source_id: Source node ID
+        target_id: Target node ID
+        edge_type: Relationship (related, caused_by, supports, contradicts)
+        weight: Initial edge weight (0.0-1.0)
+    """
+    return await mcp_graph_tools.graph_create_edge(source_id, target_id, edge_type, weight)
+
+
+@mcp.tool()
+async def graph_get_connected(
+    node_id: str,
+    direction: str = "both",
+    min_weight: float = 0.1,
+    limit: int = 10,
+) -> str:
+    """Get nodes connected to a given node.
+
+    Args:
+        node_id: The node to find connections for
+        direction: outgoing, incoming, or both
+        min_weight: Minimum edge weight to include
+        limit: Maximum results
+    """
+    return await mcp_graph_tools.graph_get_connected(node_id, direction, min_weight, limit)
+
+
+@mcp.tool()
+async def graph_traverse(
+    start_node_id: str,
+    max_depth: int = 2,
+    max_nodes: int = 20,
+    min_weight: float = 0.2,
+) -> str:
+    """Traverse the memory graph from a starting node (BFS).
+
+    Args:
+        start_node_id: Node to start traversal from
+        max_depth: Maximum traversal depth
+        max_nodes: Maximum nodes to return
+        min_weight: Minimum edge weight to follow
+    """
+    return await mcp_graph_tools.graph_traverse(
+        start_node_id, max_depth, max_nodes, min_weight
+    )
+
+
+@mcp.tool()
+async def graph_stats() -> str:
+    """Get statistics about the memory graph."""
+    return await mcp_graph_tools.graph_stats()
+
+
 
 
 @mcp.tool()

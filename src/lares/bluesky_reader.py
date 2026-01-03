@@ -9,11 +9,12 @@ Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD in .env to enable.
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 
 import structlog
 
@@ -344,6 +345,152 @@ def search_posts(query: str, limit: int = 10) -> BlueskyFeedResult:
         return BlueskyFeedResult(posts=[], error=str(e))
 
 
+@dataclass
+class BlueskyNotification:
+    """A single BlueSky notification."""
+
+    reason: str  # like, repost, follow, mention, reply, quote
+    author_handle: str
+    author_display_name: str
+    created_at: str
+    uri: str
+    is_read: bool
+    text: str | None = None  # For mentions/replies/quotes
+
+    def format_brief(self) -> str:
+        """Format as a brief summary."""
+        name = self.author_display_name or self.author_handle
+        emoji = {
+            "like": "❤️",
+            "repost": "🔄",
+            "follow": "👤",
+            "mention": "📣",
+            "reply": "💬",
+            "quote": "💭",
+        }.get(self.reason, "🔔")
+
+        if self.reason == "follow":
+            return f"{emoji} **{name}** followed you"
+        elif self.reason == "like":
+            return f"{emoji} **{name}** liked your post"
+        elif self.reason == "repost":
+            return f"{emoji} **{name}** reposted your post"
+        elif self.text:
+            text_preview = self.text[:100] + "..." if len(self.text) > 100 else self.text
+            text_preview = text_preview.replace("\n", " ")
+            return f"{emoji} **{name}**: {text_preview}"
+        else:
+            return f"{emoji} **{name}** ({self.reason})"
+
+
+@dataclass
+class BlueskyNotificationsResult:
+    """Result of fetching BlueSky notifications."""
+
+    notifications: list[BlueskyNotification]
+    cursor: str | None = None
+    error: str | None = None
+
+    def format_summary(self, max_items: int = 10) -> str:
+        """Format notifications as readable summary."""
+        if self.error:
+            return f"❌ Error fetching notifications: {self.error}"
+
+        if not self.notifications:
+            return "📭 No new notifications."
+
+        lines = ["🔔 **BlueSky Notifications**", ""]
+        for notif in self.notifications[:max_items]:
+            lines.append(notif.format_brief())
+            lines.append("")
+
+        remaining = len(self.notifications) - max_items
+        if remaining > 0:
+            lines.append(f"... and {remaining} more notifications")
+
+        return "\n".join(lines)
+
+
+def get_notifications(limit: int = 20) -> BlueskyNotificationsResult:
+    """
+    Get recent notifications from BlueSky.
+
+    Requires authentication - set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD in .env.
+
+    Args:
+        limit: Maximum number of notifications to return
+
+    Returns:
+        BlueskyNotificationsResult containing notifications or error
+    """
+    log.info("fetching_bluesky_notifications", limit=limit)
+
+    auth_token = _get_auth_token()
+    if not auth_token:
+        return BlueskyNotificationsResult(
+            notifications=[],
+            error="Notifications require auth. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
+        )
+
+    def _do_fetch(token: str) -> BlueskyNotificationsResult:
+        url = f"{BSKY_AUTH_API}/app.bsky.notification.listNotifications?limit={limit}"
+        headers = {"Authorization": f"Bearer {token}"}
+        data = _make_request(url, headers=headers)
+
+        notifications = []
+        for item in data.get("notifications", []):
+            try:
+                author = item.get("author", {})
+                record = item.get("record", {})
+
+                notif = BlueskyNotification(
+                    reason=item.get("reason", "unknown"),
+                    author_handle=author.get("handle", "unknown"),
+                    author_display_name=author.get("displayName", ""),
+                    created_at=item.get("indexedAt", ""),
+                    uri=item.get("uri", ""),
+                    is_read=item.get("isRead", False),
+                    text=record.get("text") if record else None,
+                )
+                notifications.append(notif)
+            except Exception as e:
+                log.warning("failed_to_parse_notification", error=str(e))
+                continue
+
+        log.info("bluesky_notifications_fetched", count=len(notifications))
+        return BlueskyNotificationsResult(
+            notifications=notifications,
+            cursor=data.get("cursor"),
+        )
+
+    try:
+        return _do_fetch(auth_token)
+
+    except urllib.error.HTTPError as e:
+        if _is_token_expired_error(e):
+            log.info("bluesky_token_expired_retrying")
+            new_token = _get_auth_token(force_refresh=True)
+            if new_token:
+                try:
+                    return _do_fetch(new_token)
+                except urllib.error.HTTPError as retry_e:
+                    error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
+                    return BlueskyNotificationsResult(notifications=[], error=error_msg)
+
+        error_msg = f"HTTP {e.code}: {e.reason}"
+        log.error("bluesky_notifications_http_error", error=error_msg)
+        return BlueskyNotificationsResult(notifications=[], error=error_msg)
+
+    except urllib.error.URLError as e:
+        error_msg = f"Network error: {e.reason}"
+        log.error("bluesky_notifications_network_error", error=error_msg)
+        return BlueskyNotificationsResult(notifications=[], error=error_msg)
+
+    except Exception as e:
+        log.error("bluesky_notifications_error", error=str(e), error_type=type(e).__name__)
+        return BlueskyNotificationsResult(notifications=[], error=str(e))
+
+
 # Convenience test
 if __name__ == "__main__":
     # Test with a public account
@@ -371,6 +518,447 @@ class BlueskyPostResult:
             return f"✅ Posted to BlueSky!\nURI: {self.uri}"
         else:
             return f"❌ Failed to post: {self.error}"
+
+
+def resolve_handle_to_did(handle: str) -> str | None:
+    """
+    Resolve a BlueSky handle to its DID.
+
+    Args:
+        handle: The user's handle (e.g., "user.bsky.social")
+
+    Returns:
+        The user's DID or None if resolution fails
+    """
+    if not handle.endswith(".bsky.social") and "." not in handle:
+        handle = f"{handle}.bsky.social"
+    handle = handle.lstrip("@")
+
+    try:
+        resolve_url = f"{BSKY_PUBLIC_API}/com.atproto.identity.resolveHandle?handle={handle}"
+        data = _make_request(resolve_url)
+        return data.get("did")
+    except Exception as e:
+        log.error("bluesky_resolve_handle_failed", handle=handle, error=str(e))
+        return None
+
+
+def parse_mentions(text: str) -> list[dict]:
+    """
+    Parse @mentions from text and return facet structures.
+
+    Args:
+        text: The post text containing @mentions
+
+    Returns:
+        List of facet dicts with byte positions and DIDs
+    """
+    facets = []
+    mention_pattern = re.compile(r"@([a-zA-Z0-9._-]+(?:\.[a-zA-Z0-9._-]+)*)")
+
+    for match in mention_pattern.finditer(text):
+        handle = match.group(1)
+        did = resolve_handle_to_did(handle)
+        if not did:
+            log.warning("bluesky_mention_resolve_failed", handle=handle)
+            continue
+
+        mention_text = match.group(0)
+        start_char = match.start()
+        byte_start = len(text[:start_char].encode("utf-8"))
+        byte_end = byte_start + len(mention_text.encode("utf-8"))
+
+        facets.append({
+            "index": {
+                "byteStart": byte_start,
+                "byteEnd": byte_end,
+            },
+            "features": [
+                {
+                    "$type": "app.bsky.richtext.facet#mention",
+                    "did": did,
+                }
+            ],
+        })
+
+    return facets
+
+
+def parse_tags(text: str) -> list[dict]:
+    """
+    Parse #hashtags from text and return facet structures.
+
+    Args:
+        text: The post text containing #hashtags
+
+    Returns:
+        List of facet dicts with byte positions and tag values
+    """
+    facets = []
+    tag_pattern = re.compile(r"#([a-zA-Z0-9_]+)")
+
+    for match in tag_pattern.finditer(text):
+        tag = match.group(1)
+        tag_text = match.group(0)
+        start_char = match.start()
+        byte_start = len(text[:start_char].encode("utf-8"))
+        byte_end = byte_start + len(tag_text.encode("utf-8"))
+
+        facets.append({
+            "index": {
+                "byteStart": byte_start,
+                "byteEnd": byte_end,
+            },
+            "features": [
+                {
+                    "$type": "app.bsky.richtext.facet#tag",
+                    "tag": tag,
+                }
+            ],
+        })
+
+    return facets
+
+
+def parse_facets(text: str) -> list[dict]:
+    """
+    Parse all facets (mentions and tags) from text.
+
+    Args:
+        text: The post text
+
+    Returns:
+        List of all facet dicts
+    """
+    return parse_mentions(text) + parse_tags(text)
+
+
+@dataclass
+class BlueskyFollowResult:
+    """Result of a follow/unfollow operation."""
+
+    success: bool
+    uri: str | None = None
+    error: str | None = None
+
+    def format_result(self) -> str:
+        if self.success:
+            return f"✅ Follow operation successful!\nURI: {self.uri}"
+        else:
+            return f"❌ Follow operation failed: {self.error}"
+
+
+def follow_user(handle: str) -> BlueskyFollowResult:
+    """
+    Follow a user on BlueSky.
+
+    Args:
+        handle: The handle of the user to follow
+
+    Returns:
+        BlueskyFollowResult indicating success or failure
+    """
+    log.info("bluesky_following_user", handle=handle)
+
+    did = resolve_handle_to_did(handle)
+    if not did:
+        return BlueskyFollowResult(
+            success=False,
+            error=f"Could not resolve handle: {handle}"
+        )
+
+    auth_token = _get_auth_token()
+    if not auth_token:
+        return BlueskyFollowResult(
+            success=False,
+            error="Authentication required. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
+        )
+
+    my_did = _session_cache.get("did")
+    if not my_did:
+        return BlueskyFollowResult(
+            success=False,
+            error="No DID in session cache. Re-authentication required."
+        )
+
+    def _do_follow(token: str) -> BlueskyFollowResult:
+        create_url = f"{BSKY_AUTH_API}/com.atproto.repo.createRecord"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        record = {
+            "$type": "app.bsky.graph.follow",
+            "subject": did,
+            "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+
+        payload = {
+            "repo": my_did,
+            "collection": "app.bsky.graph.follow",
+            "record": record,
+        }
+
+        response = _make_post_request(create_url, payload, headers)
+        log.info("bluesky_follow_created", uri=response.get("uri"), handle=handle)
+        return BlueskyFollowResult(
+            success=True,
+            uri=response.get("uri"),
+        )
+
+    try:
+        return _do_follow(auth_token)
+    except urllib.error.HTTPError as e:
+        if _is_token_expired_error(e):
+            log.info("bluesky_token_expired_retrying")
+            new_token = _get_auth_token(force_refresh=True)
+            if new_token:
+                try:
+                    return _do_follow(new_token)
+                except urllib.error.HTTPError as retry_e:
+                    error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
+                    return BlueskyFollowResult(success=False, error=error_msg)
+        error_msg = f"HTTP {e.code}: {e.reason}"
+        return BlueskyFollowResult(success=False, error=error_msg)
+    except Exception as e:
+        log.error("bluesky_follow_error", error=str(e))
+        return BlueskyFollowResult(success=False, error=str(e))
+
+
+def unfollow_user(handle: str) -> BlueskyFollowResult:
+    """
+    Unfollow a user on BlueSky.
+
+    Args:
+        handle: The handle of the user to unfollow
+
+    Returns:
+        BlueskyFollowResult indicating success or failure
+    """
+    log.info("bluesky_unfollowing_user", handle=handle)
+
+    did = resolve_handle_to_did(handle)
+    if not did:
+        return BlueskyFollowResult(
+            success=False,
+            error=f"Could not resolve handle: {handle}"
+        )
+
+    auth_token = _get_auth_token()
+    if not auth_token:
+        return BlueskyFollowResult(
+            success=False,
+            error="Authentication required. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
+        )
+
+    my_did = _session_cache.get("did")
+    if not my_did:
+        return BlueskyFollowResult(
+            success=False,
+            error="No DID in session cache. Re-authentication required."
+        )
+
+    try:
+        list_url = (
+            f"{BSKY_AUTH_API}/com.atproto.repo.listRecords"
+            f"?repo={my_did}&collection=app.bsky.graph.follow&limit=100"
+        )
+        headers = {"Authorization": f"Bearer {auth_token}"}
+        response = _make_request(list_url, headers)
+
+        record_key = None
+        for record in response.get("records", []):
+            if record.get("value", {}).get("subject") == did:
+                uri = record.get("uri", "")
+                record_key = uri.split("/")[-1]
+                break
+
+        if not record_key:
+            return BlueskyFollowResult(
+                success=False,
+                error=f"Not following user: {handle}"
+            )
+
+        delete_url = f"{BSKY_AUTH_API}/com.atproto.repo.deleteRecord"
+        payload = {
+            "repo": my_did,
+            "collection": "app.bsky.graph.follow",
+            "rkey": record_key,
+        }
+        _make_post_request(delete_url, payload, headers)
+
+        log.info("bluesky_unfollow_success", handle=handle)
+        return BlueskyFollowResult(
+            success=True,
+            uri=f"Unfollowed {handle}",
+        )
+    except urllib.error.HTTPError as e:
+        error_msg = f"HTTP {e.code}: {e.reason}"
+        return BlueskyFollowResult(success=False, error=error_msg)
+    except Exception as e:
+        log.error("bluesky_unfollow_error", error=str(e))
+        return BlueskyFollowResult(success=False, error=str(e))
+
+
+@dataclass
+class BlueskyPostInfo:
+    """Information about a BlueSky post needed for replies."""
+
+    uri: str
+    cid: str
+    author_did: str
+    text: str
+    root_uri: str | None = None
+    root_cid: str | None = None
+
+
+def get_post(uri: str) -> BlueskyPostInfo | None:
+    """
+    Fetch a post's details by its AT URI.
+
+    Args:
+        uri: The AT URI of the post (at://did:plc:.../app.bsky.feed.post/...)
+
+    Returns:
+        BlueskyPostInfo with post details or None if not found
+    """
+    log.info("bluesky_fetching_post", uri=uri)
+
+    try:
+        encoded_uri = urllib.parse.quote(uri, safe="")
+        url = f"{BSKY_PUBLIC_API}/app.bsky.feed.getPosts?uris={encoded_uri}"
+        data = _make_request(url)
+
+        posts = data.get("posts", [])
+        if not posts:
+            log.warning("bluesky_post_not_found", uri=uri)
+            return None
+
+        post = posts[0]
+        record = post.get("record", {})
+        reply = record.get("reply", {})
+
+        root_uri = None
+        root_cid = None
+        if reply:
+            root = reply.get("root", {})
+            root_uri = root.get("uri")
+            root_cid = root.get("cid")
+
+        return BlueskyPostInfo(
+            uri=post.get("uri"),
+            cid=post.get("cid"),
+            author_did=post.get("author", {}).get("did"),
+            text=record.get("text", ""),
+            root_uri=root_uri,
+            root_cid=root_cid,
+        )
+    except Exception as e:
+        log.error("bluesky_get_post_error", uri=uri, error=str(e))
+        return None
+
+
+def create_reply(text: str, parent_uri: str) -> BlueskyPostResult:
+    """
+    Create a reply to an existing BlueSky post.
+
+    Args:
+        text: The reply text (max 300 characters)
+        parent_uri: The AT URI of the post to reply to
+
+    Returns:
+        BlueskyPostResult indicating success or failure
+    """
+    log.info("bluesky_creating_reply", text_length=len(text), parent_uri=parent_uri)
+
+    if len(text) > 300:
+        return BlueskyPostResult(
+            success=False,
+            error=f"Reply too long ({len(text)} chars). Maximum is 300 characters."
+        )
+
+    if not text.strip():
+        return BlueskyPostResult(
+            success=False,
+            error="Reply text cannot be empty."
+        )
+
+    parent_post = get_post(parent_uri)
+    if not parent_post:
+        return BlueskyPostResult(
+            success=False,
+            error=f"Could not fetch parent post: {parent_uri}"
+        )
+
+    auth_token = _get_auth_token()
+    if not auth_token:
+        return BlueskyPostResult(
+            success=False,
+            error="Authentication required. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
+        )
+
+    my_did = _session_cache.get("did")
+    if not my_did:
+        return BlueskyPostResult(
+            success=False,
+            error="No DID in session cache. Re-authentication required."
+        )
+
+    root_uri = parent_post.root_uri or parent_post.uri
+    root_cid = parent_post.root_cid or parent_post.cid
+
+    def _do_reply(token: str) -> BlueskyPostResult:
+        create_url = f"{BSKY_AUTH_API}/com.atproto.repo.createRecord"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        record = {
+            "$type": "app.bsky.feed.post",
+            "text": text,
+            "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "reply": {
+                "root": {
+                    "uri": root_uri,
+                    "cid": root_cid,
+                },
+                "parent": {
+                    "uri": parent_post.uri,
+                    "cid": parent_post.cid,
+                },
+            },
+        }
+
+        facets = parse_facets(text)
+        if facets:
+            record["facets"] = facets
+
+        payload = {
+            "repo": my_did,
+            "collection": "app.bsky.feed.post",
+            "record": record,
+        }
+
+        response = _make_post_request(create_url, payload, headers)
+        log.info("bluesky_reply_created", uri=response.get("uri"))
+        return BlueskyPostResult(
+            success=True,
+            uri=response.get("uri"),
+            cid=response.get("cid"),
+        )
+
+    try:
+        return _do_reply(auth_token)
+    except urllib.error.HTTPError as e:
+        if _is_token_expired_error(e):
+            new_token = _get_auth_token(force_refresh=True)
+            if new_token:
+                try:
+                    return _do_reply(new_token)
+                except urllib.error.HTTPError as retry_e:
+                    error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
+                    return BlueskyPostResult(success=False, error=error_msg)
+        error_msg = f"HTTP {e.code}: {e.reason}"
+        return BlueskyPostResult(success=False, error=error_msg)
+    except Exception as e:
+        log.error("bluesky_reply_error", error=str(e))
+        return BlueskyPostResult(success=False, error=str(e))
 
 
 def create_post(text: str) -> BlueskyPostResult:
@@ -413,6 +1001,10 @@ def create_post(text: str) -> BlueskyPostResult:
             "text": text,
             "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
+
+        facets = parse_facets(text)
+        if facets:
+            record["facets"] = facets
 
         payload = {
             "repo": did,

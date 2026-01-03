@@ -96,7 +96,8 @@ class TestAsyncToolExecutor:
             result = await executor_with_discord.execute(
                 "run_command", {"command": "rm -rf /"}
             )
-            assert "Queued for approval" in result
+            # Updated to match new message format
+            assert "PENDING APPROVAL" in result
             assert "abc123" in result
 
     @pytest.mark.asyncio

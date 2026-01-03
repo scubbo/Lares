@@ -63,3 +63,4 @@ backups/
 test_*.py
 debug_*.py
 fix_*.md
+*.bak

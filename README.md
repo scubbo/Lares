@@ -383,9 +383,9 @@ If tools appear as text like "[Tool-only response: ...]":
 
 ### Available Tools
 
-Lares has access to 20 tools (native + MCP), plus optional Obsidian integration:
+Lares has access to 23 tools (native + MCP), plus optional Obsidian integration:
 
-#### Native Tools (10)
+#### Native Tools (13)
 
 | Tool | Description |
 |------|-------------|
@@ -398,7 +398,10 @@ Lares has access to 20 tools (native + MCP), plus optional Obsidian integration:
 | `read_rss_feed` | Read RSS/Atom feeds |
 | `read_bluesky_user` | Read posts from a BlueSky user |
 | `search_bluesky` | Search BlueSky posts |
-| `post_to_bluesky` | Post to BlueSky (async approval workflow) |
+| `post_to_bluesky` | Post to BlueSky with @mention support (requires approval) |
+| `follow_bluesky_user` | Follow a user on BlueSky (no approval - reversible) |
+| `unfollow_bluesky_user` | Unfollow a user on BlueSky (no approval - reversible) |
+| `reply_to_bluesky_post` | Reply to a BlueSky post (requires approval) |
 | `discord_send_message` | Send messages to Discord (reply mode optional) |
 | `discord_react` | React to messages with emoji |
 | `restart_lares` | Restart the Lares service |
@@ -463,7 +466,7 @@ python -m lares.mcp_server
 # Or as a systemd service (see lares-mcp.service)
 ```
 
-### MCP Tools (10)
+### MCP Tools (13)
 
 The MCP server provides these tools:
 
@@ -476,7 +479,10 @@ The MCP server provides these tools:
 | `read_rss_feed` | Read RSS/Atom feeds |
 | `read_bluesky_user` | Read posts from a BlueSky user |
 | `search_bluesky` | Search BlueSky posts |
-| `post_to_bluesky` | Post to BlueSky (requires approval) |
+| `post_to_bluesky` | Post to BlueSky with @mention support (requires approval) |
+| `follow_bluesky_user` | Follow a user on BlueSky (no approval) |
+| `unfollow_bluesky_user` | Unfollow a user on BlueSky (no approval) |
+| `reply_to_bluesky_post` | Reply to a BlueSky post (requires approval) |
 | `search_obsidian_notes` | Search notes in Obsidian vault |
 | `read_obsidian_note` | Read a specific note from Obsidian |
 

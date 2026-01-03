@@ -32,6 +32,22 @@ log = structlog.get_logger()
 PERCH_INTERVAL_MINUTES = int(os.getenv("LARES_PERCH_INTERVAL_MINUTES", "30"))
 
 
+def at_uri_to_web_url(at_uri: str) -> str:
+    """Convert an AT URI to a BlueSky web URL.
+
+    Example: at://did:plc:abc123/app.bsky.feed.post/xyz789
+          -> https://bsky.app/profile/did:plc:abc123/post/xyz789
+    """
+    if not at_uri.startswith("at://"):
+        return at_uri
+    parts = at_uri[5:].split("/")
+    if len(parts) >= 3 and parts[1] == "app.bsky.feed.post":
+        did = parts[0]
+        rkey = parts[2]
+        return f"https://bsky.app/profile/{did}/post/{rkey}"
+    return at_uri
+
+
 class ApprovalManager:
     """Manages MCP approval workflow via Discord."""
 
@@ -72,6 +88,13 @@ class ApprovalManager:
                 post_text = args.get("text", "")
                 text = f"```\n{post_text}\n```"
                 title = "🦋 BlueSky Post Approval"
+                footer = "✅ Approve  |  ❌ Deny"
+            elif tool == "reply_to_bluesky_post":
+                reply_text = args.get("text", "")
+                parent_uri = args.get("parent_uri", "")
+                parent_url = at_uri_to_web_url(parent_uri)
+                text = f"```\n{reply_text}\n```\nReplying to: {parent_url}"
+                title = "💬 BlueSky Reply Approval"
                 footer = "✅ Approve  |  ❌ Deny"
             else:
                 text = f"Tool: {tool}\nArgs: {args}"
@@ -396,7 +419,7 @@ async def run() -> None:
     log.info("lares_online")
 
     for attempt in range(5):
-        result = await discord.send_message("🦉 Lares online (MCP mode)")
+        result = await discord.send_message("🏛️ Lares online (MCP mode)")
         if result.get("status") == "ok":
             break
         log.warning("startup_message_failed", attempt=attempt + 1, result=result)

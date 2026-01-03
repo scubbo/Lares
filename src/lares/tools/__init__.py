@@ -17,7 +17,15 @@ from lares.tools.base import (
     ToolError,
     ToolResult,
 )
-from lares.tools.bluesky import post_to_bluesky, read_bluesky_user, search_bluesky
+from lares.tools.bluesky import (
+    follow_bluesky_user,
+    get_bluesky_notifications,
+    post_to_bluesky,
+    read_bluesky_user,
+    reply_to_bluesky_post,
+    search_bluesky,
+    unfollow_bluesky_user,
+)
 from lares.tools.discord import (
     clear_discord_context,
     fetch_discord_history,
@@ -68,6 +76,10 @@ __all__ = [
     "read_bluesky_user",
     "post_to_bluesky",
     "search_bluesky",
+    "follow_bluesky_user",
+    "unfollow_bluesky_user",
+    "reply_to_bluesky_post",
+    "get_bluesky_notifications",
     "restart_lares",
     "restart_mcp",
     "validate_tool_code",

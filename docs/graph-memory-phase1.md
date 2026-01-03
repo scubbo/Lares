@@ -1,15 +1,25 @@
 # Graph Memory - Phase 1 Implementation
 
 *Created: 2026-01-03*
-*Status: Draft - ready for implementation*
+*Status: ✅ COMPLETE - Ready for merge*
 
 ## Overview
 
 This document specifies Phase 1 of the graph memory architecture: schema definition and basic CRUD operations. The goal is to extend the existing SQLite provider to support memory nodes and edges without breaking current functionality.
 
-## Schema Extension
+## Implementation Summary
 
-Add to `SqliteMemoryProvider._create_tables()`:
+**All Phase 1 features implemented and tested:**
+- `src/lares/providers/sqlite_graph.py` - GraphMemoryMixin (479 lines)
+- `src/lares/providers/sqlite_with_graph.py` - Combined provider
+- `src/lares/mcp_graph_tools.py` - Tool implementation
+- 6 MCP tools registered in `mcp_server.py`
+- 19 tests in `tests/test_graph_memory.py`
+- All 252 tests passing
+
+## Schema
+
+The following tables are created by `GraphMemoryMixin._create_graph_tables()`:
 
 ```sql
 -- Memory graph nodes
@@ -47,152 +57,141 @@ CREATE INDEX IF NOT EXISTS idx_nodes_source ON memory_nodes(source);
 CREATE INDEX IF NOT EXISTS idx_nodes_accessed ON memory_nodes(last_accessed DESC);
 ```
 
-## New Methods for SqliteMemoryProvider
+## MCP Tools Available
 
-### Node Operations
+### graph_create_node
+Create a new memory node with content and metadata.
 
-```python
-async def create_memory_node(
-    self,
-    content: str,
-    source: str = "conversation",
-    summary: str | None = None,
-    tags: list[str] | None = None,
-) -> str:
-    """Create a new memory node.
-    
-    Returns the node ID.
-    """
+**Parameters:**
+- `content` (required): The memory content
+- `source` (optional): 'conversation', 'perch_tick', 'research', 'reflection' (default: 'conversation')
+- `summary` (optional): Short summary for quick reference
+- `tags` (optional): Comma-separated tags
 
-async def get_memory_node(self, node_id: str) -> dict | None:
-    """Get a single memory node by ID."""
+**Returns:** Node ID (UUID)
 
-async def search_memory_nodes(
-    self,
-    query: str,
-    limit: int = 10,
-    source_filter: str | None = None,
-) -> list[dict]:
-    """Search nodes by content (text search for Phase 1)."""
+### graph_search_nodes
+Search for nodes by text content.
 
-async def list_recent_nodes(
-    self,
-    limit: int = 20,
-    source_filter: str | None = None,
-) -> list[dict]:
-    """List recently created/accessed nodes."""
+**Parameters:**
+- `query` (required): Search text
+- `limit` (optional): Max results (default: 10)
+- `source` (optional): Filter by source type
 
-async def update_node_access(self, node_id: str) -> None:
-    """Update access count and last_accessed timestamp."""
+**Returns:** List of matching nodes
+
+### graph_create_edge
+Create or update an edge between two nodes.
+
+**Parameters:**
+- `source_id` (required): Source node ID
+- `target_id` (required): Target node ID
+- `edge_type` (optional): 'related', 'causal', 'temporal', 'contradicts' (default: 'related')
+- `weight` (optional): Initial weight 0.0-1.0 (default: 0.5)
+
+**Returns:** Edge ID (UUID)
+
+### graph_get_connected
+Get nodes connected to a given node.
+
+**Parameters:**
+- `node_id` (required): The node to find connections for
+- `direction` (optional): 'outgoing', 'incoming', 'both' (default: 'both')
+- `min_weight` (optional): Minimum edge weight (default: 0.1)
+- `limit` (optional): Max results (default: 10)
+
+**Returns:** List of connected nodes with edge info
+
+### graph_traverse
+BFS traversal from a starting node.
+
+**Parameters:**
+- `start_node_id` (required): Starting node
+- `max_depth` (optional): How far to traverse (default: 2)
+- `max_nodes` (optional): Max nodes to return (default: 20)
+- `min_weight` (optional): Minimum edge weight to follow (default: 0.2)
+
+**Returns:** List of nodes with distance from start
+
+### graph_stats
+Get statistics about the memory graph.
+
+**Returns:** Node count, edge count, nodes by source, average connections
+
+## Usage Examples
+
+### Storing a memory from conversation
+```
+graph_create_node(
+    content="Daniele is training for Aconcagua with coach Seth Keena using House/Johnston methodology",
+    source="conversation",
+    summary="Aconcagua training setup",
+    tags="mountaineering,training,aconcagua"
+)
 ```
 
-### Edge Operations
-
-```python
-async def create_memory_edge(
-    self,
-    source_id: str,
-    target_id: str,
-    edge_type: str = "related",
-    initial_weight: float = 0.5,
-) -> str:
-    """Create an edge between two nodes.
-    
-    Returns edge ID. Upserts if edge exists.
-    """
-
-async def strengthen_edge(
-    self,
-    source_id: str,
-    target_id: str,
-    amount: float = 0.1,
-) -> float:
-    """Strengthen an edge (Hebbian learning).
-    
-    Returns new weight (capped at 1.0).
-    """
-
-async def get_connected_nodes(
-    self,
-    node_id: str,
-    direction: str = "both",  # "outgoing", "incoming", "both"
-    min_weight: float = 0.1,
-    limit: int = 10,
-) -> list[dict]:
-    """Get nodes connected to this one, sorted by edge weight."""
-
-async def traverse_graph(
-    self,
-    start_node_id: str,
-    max_depth: int = 2,
-    max_nodes: int = 20,
-    min_weight: float = 0.2,
-) -> list[dict]:
-    """BFS traversal from a starting node.
-    
-    Returns nodes with their distance from start.
-    """
+### Finding related memories
+```
+graph_search_nodes(query="training", source="conversation")
 ```
 
-## MCP Tools (for me to use)
+### Connecting related concepts
+```
+# After finding node IDs for "Aconcagua training" and "House/Johnston methodology"
+graph_create_edge(
+    source_id="abc123...",
+    target_id="def456...",
+    edge_type="related",
+    weight=0.7
+)
+```
 
-### memory_node_create
-Create a new memory node with content and optional metadata.
+### Exploring a topic
+```
+# Start from a node and see what's connected
+graph_traverse(
+    start_node_id="abc123...",
+    max_depth=2,
+    min_weight=0.3
+)
+```
 
-### memory_node_link
-Create or strengthen a link between two nodes.
+## API Nuances (from testing)
 
-### memory_node_search
-Search for nodes matching a query.
+1. **Node/edge IDs are UUIDs** - Generated automatically, not prefixed
+2. **Access tracking is read-then-increment** - `get_memory_node` returns current count, THEN increments
+3. **Search matches content and summary** - Not tags (would need JSON extraction)
+4. **Edge weight capped at 1.0** - `strengthen_edge` won't exceed this
+5. **Edges are directional** - A→B is different from B→A
 
-### memory_graph_explore
-Traverse the graph from a starting node.
+## Future Phases
 
-### memory_graph_stats
-Show statistics: node count, edge count, avg connections, etc.
+### Phase 2: Semantic Search
+- Add embedding generation (sqlite-vec or external)
+- Vector similarity for retrieval
+- Hybrid search (text + semantic)
 
-## Usage Patterns
+### Phase 3: Automatic Linking
+- Extract entities/concepts from conversations
+- Auto-create nodes for important information
+- Suggest edges based on co-occurrence
 
-### Creating memories from conversations
-When Daniele shares something important:
-1. I call `memory_node_create` with the key information
-2. I search for related existing nodes
-3. I call `memory_node_link` to connect them
+### Phase 4: Hebbian Learning
+- Strengthen edges when nodes accessed together
+- Decay edges over time
+- Prune weak connections
 
-### Retrieving context (Phase 2+)
-Before responding:
-1. System embeds the incoming message
-2. System finds top-K similar nodes
-3. System traverses edges to find related context
-4. Context is injected into my prompt
+## Completion Checklist
 
-### Hebbian reinforcement (Phase 4+)
-When multiple nodes are accessed together:
-1. Track which nodes appear in same context
-2. Strengthen edges between co-accessed nodes
-3. Decay edges during perch ticks if not accessed
-
-## Migration Path
-
-1. Add new tables (non-breaking)
-2. Add new methods to SqliteMemoryProvider
-3. Create MCP tools that wrap the methods
-4. Test manually via MCP
-5. Later: automatic retrieval, decay, etc.
-
-## Open Decisions
-
-- [ ] **Summary generation**: Auto-generate from content or require manual?
-- [ ] **Bidirectional edges**: Store one edge or two? (Currently: two, via UNIQUE constraint)
-- [ ] **Decay rate**: What's the half-life? (Propose: 7 days, 0.1 floor)
-- [ ] **Token budget**: How much graph context to inject? (Propose: 2000 tokens max)
-
-## Next Steps
-
-1. ✅ Write this spec
-2. [ ] Implement schema extension
-3. [ ] Implement node CRUD methods
-4. [ ] Implement edge methods
-5. [ ] Create MCP tools
-6. [ ] Manual testing
-7. [ ] Document usage patterns
+- [x] Write implementation spec
+- [x] Implement schema extension (sqlite_graph.py)
+- [x] Implement node CRUD methods
+- [x] Implement edge methods
+- [x] Implement graph traversal
+- [x] Create combined provider (sqlite_with_graph.py)
+- [x] Create MCP tools (mcp_graph_tools.py)
+- [x] Register tools in mcp_server.py
+- [x] Write tests (19 tests)
+- [x] All tests passing (252 total)
+- [ ] Merge to master
+- [ ] Start using in production
